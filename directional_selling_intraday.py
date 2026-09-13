@@ -1,69 +1,90 @@
 from flask import Flask, jsonify
 from datetime import datetime
-import pytz, requests
+import pytz, requests, os
+
 app = Flask(__name__)
 
-OTM_PERCENT = 0.5
-SL_PERCENT = 50
-ENTRY_START = 7
-LAST_ENTRY = 14
-trade = {"sell_price": 0, "sl_price": 0, "strike": "", "side": ""}
+# ===== FINAL JUJU BOT - DELTA DEMO ONLY =====
+DEMO_URL = "https://api.demo.delta.exchange"
+OTM = 0.5
+GAP = 70  # Tera 70 ka gap - FIX
+START_HOUR = 7
+LAST_ENTRY_HOUR = 14
 
-def ist_now():
+trade = {"active": False, "sell": 0, "sl": 0, "strike": "", "side": "", "gap": 70}
+
+def now_ist():
     return datetime.now(pytz.timezone('Asia/Kolkata'))
 
-def is_entry_time():
-    now = ist_now()
-    if now.hour < ENTRY_START: return False, f"WAIT - 7 AM se start, abhi {now.strftime('%H:%M')}"
-    if now.hour >= 15: return False, "CLOSED - 3:15 PM square off"
-    return True, "Market ON"
-
-def get_btc_info():
+def get_btc():
     try:
-        r = requests.get("https://api.delta.exchange/v2/tickers/BTCUSD", timeout=10).json()
-        btc = float(r['result']['mark_price'])
-        direction = "BULLISH" if btc > 113000 else "BEARISH"
-        return btc, direction
-    except Exception as e:
-        return None, str(e)
+        r = requests.get(f"{DEMO_URL}/v2/tickers/BTCUSD", timeout=5).json()
+        price = float(r['result']['mark_price'])
+        # GREEN / RED - Yaha RSI+Supertrend ayega, abhi price se
+        trend = "GREEN" if price > 113500 else "RED"
+        return price, trend
+    except:
+        return None, "ERROR"
 
 @app.route('/')
 def home():
-    ok, msg = is_entry_time()
-    btc, direction = get_btc_info()
-    return jsonify({"bot": "directional_selling_intraday", "status": msg, "btc": btc, "direction": direction, "trade": trade})
+    btc, trend = get_btc()
+    t = now_ist()
+    return jsonify({
+        "BOT": "DEMO 0.5% OTM SELL",
+        "TIME": t.strftime("%H:%M:%S"),
+        "BTC": btc,
+        "TREND": trend,
+        "TRADE": trade,
+        "LOGIC": "80 Sell -> 150 SL (Gap 70). 70 aayi -> SL 140"
+    })
 
 @app.route('/run')
-def run_bot():
+def run():
     global trade
-    ok, msg = is_entry_time()
-    if not ok: return jsonify({"status": msg})
-    btc_price, direction = get_btc_info()
-    now = ist_now()
-    if trade["sell_price"] != 0:
-        current_ltp = 84
-        gap = trade["sell_price"] * 0.5
-        if current_ltp < trade["sell_price"]:
-            new_sl = current_ltp + gap
-            if new_sl < trade["sl_price"]:
-                trade["sl_price"] = new_sl
-                return jsonify({"status": f"TRAIL - New SL {new_sl}", "trade": trade})
-        if current_ltp >= trade["sl_price"]:
-            trade = {"sell_price": 0, "sl_price": 0, "strike": "", "side": ""}
-            return jsonify({"status": "SL HIT - Exit"})
-        return jsonify({"status": "HOLD", "trade": trade})
-    if now.hour >= LAST_ENTRY:
-        return jsonify({"status": "WAIT - 2 PM ke baad entry band, kal dekhenge"})
-    otm = btc_price * OTM_PERCENT / 100
-    if direction == "BULLISH":
-        strike = int(round((btc_price - otm)/100)*100)
-        sell_price = 85
-        trade.update({"sell_price": sell_price, "sl_price": sell_price*1.5, "strike": f"{strike} PUT", "side": "PUT SELL"})
+    t = now_ist()
+    btc, trend = get_btc()
+
+    if t.hour < START_HOUR:
+        return jsonify({"STATUS": f"WAIT - 7 AM se start hai, abhi {t.strftime('%H:%M')} hai"})
+    
+    if t.hour >= 15 and t.minute >= 15:
+        trade = {"active": False, "sell": 0, "sl": 0, "strike": "", "side": "", "gap": 70}
+        return jsonify({"STATUS": "SQUARE OFF 3:15 PM - DEMO"})
+
+    # TRADE CHAL RAHA HAI TO TRAIL KAR
+    if trade["active"]:
+        # Is jagah us option ka LTP DEMO API se ayega
+        ltp = 70  # Example
+        if ltp < trade["sell"]:
+            new_sl = ltp + GAP  # 70 + 70 = 140
+            if new_sl < trade["sl"]:
+                trade["sl"] = new_sl
+                trade["sell"] = ltp
+                return jsonify({"STATUS": f"TRAIL - LTP {ltp} -> New SL {new_sl}", "TRADE": trade})
+        if ltp >= trade["sl"]:
+            trade = {"active": False, "sell": 0, "sl": 0, "strike": "", "side": "", "gap": 70}
+            return jsonify({"STATUS": "SL HIT 150 - EXIT DEMO"})
+        return jsonify({"STATUS": "HOLD", "TRADE": trade})
+
+    # 2 PM ke baad nayi entry nahi
+    if t.hour >= LAST_ENTRY_HOUR:
+        return jsonify({"STATUS": "WAIT - 2 PM ke baad nayi entry band, kal 7 AM check"})
+
+    # CONDITION MATCH NAHI HUI TO WAIT
+    if trend not in ["GREEN", "RED"]:
+        return jsonify({"STATUS": f"WAIT - Condition match nahi, 5 min baad check [BTC {btc}]"})
+
+    # NAYI ENTRY - 0.5% OTM
+    otm_amt = btc * OTM / 100
+    if trend == "GREEN":
+        strike = int(round((btc - otm_amt)/100)*100)
+        trade = {"active": True, "sell": 80, "sl": 150, "strike": f"{strike} PUT", "side": "PUT SELL GREEN", "gap": 70}
     else:
-        strike = int(round((btc_price + otm)/100)*100)
-        sell_price = 85
-        trade.update({"sell_price": sell_price, "sl_price": sell_price*1.5, "strike": f"{strike} CALL", "side": "CALL SELL"})
-    return jsonify({"status": f"ENTRY - {trade['side']} {trade['strike']}", "trade": trade})
+        strike = int(round((btc + otm_amt)/100)*100)
+        trade = {"active": True, "sell": 80, "sl": 150, "strike": f"{strike} CALL", "side": "CALL SELL RED", "gap": 70}
+
+    return jsonify({"STATUS": f"DEMO ENTRY - {trade['side']} {trade['strike']} SELL 80 SL 150", "TRADE": trade})
 
 if __name__ == "__main__":
     app.run()
